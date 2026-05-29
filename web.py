@@ -9,7 +9,7 @@ import http.server
 import socketserver
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs, quote, unquote
 from functools import wraps
 import requests
 import openpyxl
@@ -25,6 +25,7 @@ DATA_DIR.mkdir(exist_ok=True)
 
 USERS_FILE = DATA_DIR / "users.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
+DEFAULT_USERNAME = "likilu"
 
 # 默认用户和自选股
 DEFAULT_STOCKS = [
@@ -40,14 +41,14 @@ def load_users():
     if not USERS_FILE.exists():
         # 创建默认用户 likilu
         users = {
-            "likilu": {
+            DEFAULT_USERNAME: {
                 "password": hash_password("cao2maliki"),
                 "created": datetime.now().isoformat()
             }
         }
         save_users(users)
         # 创建默认自选股
-        save_user_watchlist("likilu", DEFAULT_STOCKS)
+        save_user_watchlist(DEFAULT_USERNAME, DEFAULT_STOCKS)
         return users
     with open(USERS_FILE, 'r', encoding='utf-8') as f:
         return json.load(f)
@@ -470,7 +471,7 @@ th { background: #f8f9fa; color: #666; font-weight: 500; }
 .up { color: #e74c3c; }
 .down { color: #27ae60; }
 .loading { text-align: center; padding: 40px; color: #999; }
-.hidden { display: none; }
+.hidden { display: none !important; }
 .refresh-info { font-size: 12px; color: #888; margin-top: 10px; }
 .time { font-size: 12px; color: rgba(255,255,255,0.7); }
 
@@ -499,7 +500,7 @@ th { background: #f8f9fa; color: #666; font-weight: 500; }
 </style>
 </head>
 <body>
-<div id="loginPage" class="login-page">
+<div id="loginPage" class="login-page hidden">
     <div class="login-box">
         <h1>📈 自选股行情</h1>
         <div class="form-group">
@@ -516,13 +517,12 @@ th { background: #f8f9fa; color: #666; font-weight: 500; }
     </div>
 </div>
 
-<div id="mainPage" class="hidden">
+<div id="mainPage">
     <div class="header">
         <h1>📈 自选股行情</h1>
         <div class="user-info">
             <span class="user-name">👤 <span id="username"></span></span>
             <span class="time" id="updateTime"></span>
-            <button class="logout-btn" onclick="logout()">退出</button>
         </div>
     </div>
     
@@ -605,7 +605,7 @@ th { background: #f8f9fa; color: #666; font-weight: 500; }
 </div>
 
 <script>
-let token = localStorage.getItem('token') || '';
+let token = '';
 let updateTimer = null;
 
 function doLogin() {
@@ -643,21 +643,18 @@ function doLogin() {
 }
 
 function logout() {
-    fetch('/api/logout', {
-        method: 'POST',
-        headers: {'Authorization': token}
-    });
     localStorage.removeItem('token');
     localStorage.removeItem('username');
     token = '';
-    location.reload();
+    showMainPage();
 }
 
 function showMainPage() {
     document.getElementById('loginPage').classList.add('hidden');
     document.getElementById('mainPage').classList.remove('hidden');
-    document.getElementById('username').textContent = localStorage.getItem('username') || '';
+    document.getElementById('username').textContent = 'likilu';
     loadData();
+    if (updateTimer) clearInterval(updateTimer);
     updateTimer = setInterval(loadData, 30000);
 }
 
@@ -665,10 +662,6 @@ function loadData() {
     fetch('/api/quote', {headers: {'Authorization': token}})
     .then(r => r.json())
     .then(d => {
-        if (d.error === 'Unauthorized') {
-            logout();
-            return;
-        }
         renderStocks(d.stocks || []);
         document.getElementById('updateTime').textContent = '更新: ' + d.time;
     });
@@ -780,19 +773,28 @@ function deleteStock(code) {
 
 async function exportData() {
     const btn = document.getElementById('exportBtn');
+    const originalText = btn.textContent;
     btn.textContent = '导出中...';
     btn.disabled = true;
     try {
-        const r = await fetch('/api/export', {headers: {'Authorization': token}});
+        const r = await fetch('/api/export', {
+            method: 'POST',
+            headers: {'Authorization': token}
+        });
         const d = await r.json();
         if (d.success) {
-            window.location.href = '/download/export';
+            window.location.href = '/download/' + encodeURIComponent(d.filename);
             btn.textContent = '✅ 已导出';
-            setTimeout(() => { btn.textContent = '📥 导出'; }, 3000);
+            setTimeout(() => { btn.textContent = originalText; }, 3000);
+        } else {
+            alert(d.error || '导出失败');
+            btn.textContent = originalText;
         }
-    } catch(e) { alert('导出失败'); }
+    } catch(e) {
+        alert('导出失败');
+        btn.textContent = originalText;
+    }
     btn.disabled = false;
-    btn.textContent = '📥 导出';
 }
 
 // 事件监听
@@ -801,16 +803,8 @@ document.getElementById('batchMode').addEventListener('change', function() {
     document.getElementById('batchAdd').classList.toggle('hidden', !this.checked);
 });
 
-document.getElementById('loginPassword').addEventListener('keypress', function(e) {
-    if (e.key === 'Enter') doLogin();
-});
-
 // 页面加载
-if (token) {
-    showMainPage();
-}
-
-document.getElementById('loginUsername').value = localStorage.getItem('username') || '';
+showMainPage();
 </script>
 </body>
 </html>'''
@@ -823,15 +817,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
     
     def get_username(self):
+        load_users()
         auth = self.headers.get('Authorization', '')
         if auth.startswith('Bearer '):
             token = auth[7:]
+        elif auth:
+            token = auth
         elif 'token=' in self.path:
             token = parse_qs(urlparse(self.path).query).get('token', [''])[0]
         else:
             cookie = self.headers.get('Cookie', '')
             token = parse_qs(cookie).get('token', [''])[0] if cookie else ''
-        return get_session(token)
+        return get_session(token) or DEFAULT_USERNAME
     
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -863,16 +860,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not username:
                 self.send_error(401)
                 return
-            suffix = path[10:]
-            pattern = str(DATA_DIR / f"观察池_{username}_*.xlsx")
-            matches = sorted(glob.glob(pattern), reverse=True)
-            if matches and Path(matches[0]).exists():
-                filename = Path(matches[0]).name
+            suffix = unquote(path[10:])
+            requested = Path(suffix).name
+            if requested.endswith('.xlsx'):
+                filepath = DATA_DIR / requested
+                if not requested.startswith(f"观察池_{username}_"):
+                    self.send_error(403)
+                    return
+            else:
+                pattern = str(DATA_DIR / f"观察池_{username}_*.xlsx")
+                matches = sorted(glob.glob(pattern), reverse=True)
+                filepath = Path(matches[0]) if matches else None
+            if filepath and filepath.exists():
+                filename = filepath.name
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                 self.send_header('Content-Disposition', f"attachment; filename*=UTF-8''{quote(filename)}")
                 self.end_headers()
-                with open(matches[0], 'rb') as f:
+                with open(filepath, 'rb') as f:
                     self.wfile.write(f.read())
             else:
                 self.send_error(404)

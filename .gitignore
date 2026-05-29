@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+data/users.json
+data/sessions.json
+data/watchlist_*.json
+data/观察池_*_*.xlsx
+
+*.log
